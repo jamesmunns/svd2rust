@@ -518,6 +518,8 @@ pub fn gen_peripheral(p: &Peripheral, d: &Defaults) -> Vec<Tokens> {
     items.push(quote! {
         #![doc = #doc]
 
+        use vcell::VolatileCell;
+
         /// Register block
         #[repr(C)]
         pub struct #p_name {
@@ -655,36 +657,13 @@ pub fn gen_register(r: &Register,
     let access = access(r);
 
     let doc = respace(&r.description);
-    match access {
-        Access::ReadOnly => {
-            items.push(quote! {
-                #[doc = #doc]
-                #[repr(C)]
-                pub struct #name_pc {
-                    register: ::volatile_register::RO<#reg_ty>
-                }
-            });
+    items.push(quote! {
+        #[doc = #doc]
+        #[repr(C)]
+        pub struct #name_pc {
+            register: VolatileCell<#reg_ty>
         }
-        Access::ReadWrite => {
-            items.push(quote! {
-                #[doc = #doc]
-                #[repr(C)]
-                pub struct #name_pc {
-                    register: ::volatile_register::RW<#reg_ty>
-                }
-            });
-        }
-        Access::WriteOnly => {
-            items.push(quote! {
-                #[doc = #doc]
-                #[repr(C)]
-                pub struct #name_pc {
-                    register: ::volatile_register::WO<#reg_ty>
-                }
-            });
-        }
-        _ => unreachable!(),
-    }
+    });
 
     let mut mod_items = vec![];
     let mut impl_items = vec![];
@@ -693,14 +672,15 @@ pub fn gen_register(r: &Register,
     if access == Access::ReadWrite {
         impl_items.push(quote! {
             /// Modifies the contents of the register
-            pub fn modify<F>(&mut self, f: F)
+            #[inline(always)]
+            pub fn modify<F>(&self, f: F)
                 where for<'w> F: FnOnce(&R, &'w mut W) -> &'w mut W,
             {
-                let bits = self.register.read();
+                let bits = self.register.get();
                 let r = R { bits: bits };
                 let mut w = W { bits: bits };
                 f(&r, &mut w);
-                self.register.write(w.bits);
+                self.register.set(w.bits);
             }
         });
     }
@@ -708,8 +688,9 @@ pub fn gen_register(r: &Register,
     if access == Access::ReadOnly || access == Access::ReadWrite {
         impl_items.push(quote! {
             /// Reads the contents of the register
+            #[inline(always)]
             pub fn read(&self) -> R {
-                R { bits: self.register.read() }
+                R { bits: self.register.get() }
             }
         });
 
@@ -722,6 +703,7 @@ pub fn gen_register(r: &Register,
 
         r_impl_items.push(quote! {
             /// Value of the register as raw bits
+            #[inline(always)]
             pub fn bits(&self) -> #reg_ty {
                 self.bits
             }
@@ -731,12 +713,13 @@ pub fn gen_register(r: &Register,
     if access == Access::WriteOnly || access == Access::ReadWrite {
         impl_items.push(quote! {
             /// Writes to the register
-            pub fn write<F>(&mut self, f: F)
+            #[inline(always)]
+            pub fn write<F>(&self, f: F)
                 where F: FnOnce(&mut W) -> &mut W,
             {
                 let mut w = W::reset_value();
                 f(&mut w);
-                self.register.write(w.bits);
+                self.register.set(w.bits);
             }
         });
 
@@ -753,6 +736,7 @@ pub fn gen_register(r: &Register,
                 .map(|x| Lit::Int(x as u64, IntTy::Unsuffixed)) {
             w_impl_items.push(quote! {
                 /// Reset value of the register
+                #[inline(always)]
                 pub fn reset_value() -> W {
                     W { bits: #reset_value }
                 }
@@ -761,6 +745,7 @@ pub fn gen_register(r: &Register,
 
         w_impl_items.push(quote! {
             /// Writes raw `bits` to the register
+            #[inline(always)]
             pub unsafe fn bits(&mut self, bits: #reg_ty) -> &mut Self {
                 self.bits = bits;
                 self
@@ -799,6 +784,7 @@ pub fn gen_register(r: &Register,
                 let field_ty = width.to_ty();
 
                 r_impl_items.push(quote! {
+                    #[inline(always)]
                     fn #_field_name(&self) -> #field_ty {
                         const MASK: #field_ty = #mask;
                         const OFFSET: u8 = #offset;
@@ -889,6 +875,7 @@ pub fn gen_register(r: &Register,
                                         field.description.as_ref());
                     r_impl_items.push(quote! {
                         #[doc = #doc]
+                        #[inline(always)]
                         pub fn #field_name(&self) -> #enum_name {
                             #enum_name::_from(self.#_field_name())
                         }
@@ -921,6 +908,7 @@ pub fn gen_register(r: &Register,
                             });
                         enum_items.push(quote! {
                             /// Value of the field as raw bits
+                            #[inline(always)]
                             pub fn bits(&self) -> #field_ty {
                                 match *self {
                                     #(#arms),*
@@ -964,6 +952,7 @@ pub fn gen_register(r: &Register,
                                                   pc);
                                 enum_items.push(quote! {
                                     #[doc = #doc]
+                                    #[inline(always)]
                                     pub fn #is_variant(&self) -> bool {
                                         *self == #enum_name::#pc
                                     }
@@ -990,6 +979,7 @@ pub fn gen_register(r: &Register,
 
                         impl #name {
                             /// Value of the field as raw bits
+                            #[inline(always)]
                             pub fn bits(&self) -> #field_ty {
                                 self.bits
                             }
@@ -1000,6 +990,7 @@ pub fn gen_register(r: &Register,
                                         field.description.as_ref());
                     r_impl_items.push(quote! {
                         #[doc = #doc]
+                        #[inline(always)]
                         pub fn #field_name(&self) -> #name {
                             #name { bits: self.#_field_name() }
                         }
@@ -1151,6 +1142,7 @@ pub fn gen_register(r: &Register,
                     if bits_is_safe {
                         proxy_items.push(quote! {
                             /// Writes `variant` to the field
+                            #[inline(always)]
                             pub fn variant(self,
                                         variant: #enum_name) -> &'a mut W {
                                 self.bits(variant._bits())
@@ -1159,6 +1151,7 @@ pub fn gen_register(r: &Register,
                     } else {
                         proxy_items.push(quote! {
                             /// Writes `variant` to the field
+                            #[inline(always)]
                             pub fn variant(self,
                                         variant: #enum_name) -> &'a mut W {
                                 unsafe {
@@ -1175,6 +1168,7 @@ pub fn gen_register(r: &Register,
                         let doc = respace(&v.doc);
                         proxy_items.push(quote! {
                             #[doc = #doc]
+                            #[inline(always)]
                             pub fn #sc(self) -> &'a mut W {
                                 self.variant(#enum_name::#pc)
                             }
@@ -1185,6 +1179,7 @@ pub fn gen_register(r: &Register,
                 if bits_is_safe {
                     proxy_items.push(quote! {
                         /// Writes raw `bits` to the field
+                        #[inline(always)]
                         pub fn bits(self, bits: #field_ty) -> &'a mut W {
                             const MASK: #field_ty = #mask;
                             const OFFSET: u8 = #offset;
@@ -1199,8 +1194,9 @@ pub fn gen_register(r: &Register,
                 } else {
                     proxy_items.push(quote! {
                         /// Writes raw `bits` to the field
+                        #[inline(always)]
                         pub unsafe fn bits(self,
-                                            bits: #field_ty) -> &'a mut W {
+                                           bits: #field_ty) -> &'a mut W {
                             const MASK: #field_ty = #mask;
                             const OFFSET: u8 = #offset;
 
@@ -1224,6 +1220,7 @@ pub fn gen_register(r: &Register,
                                     field.description.as_ref());
                 w_impl_items.push(quote! {
                     #[doc = #doc]
+                    #[inline(always)]
                     pub fn #field_name_sc(&mut self) -> #proxy {
                         #proxy {
                             register: self,
