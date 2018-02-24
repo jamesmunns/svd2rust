@@ -265,10 +265,10 @@ pub fn interrupt(
     let aliases = names
         .iter()
         .map(|n| {
-            .map(|n| format!("
+            format!(
                 "
 .weak {0}
-{0} = DH_TRAMPOLINE", n))
+{0} = DH_TRAMPOLINE",
                 n
             )
         })
@@ -548,13 +548,6 @@ pub fn peripheral(
     Ok(())
 }
 
-struct RegisterBlockField {
-    field: syn::Field,
-    description: String,
-    offset: u32,
-    size: u32,
-}
-
 fn cluster_block(
     c: &Cluster,
     defaults: &Defaults,
@@ -634,8 +627,7 @@ fn register_block(
         } else {
             writeln!(
                 io::stderr(),
-                "WARNING {} overlaps with another register/cluster at offset {}. \
-                 Ignoring.",
+                "WARNING {} overlaps with another register or cluster at offset {}. Ignoring.",
                 erc.name,
                 erc.offset
             ).ok();

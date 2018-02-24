@@ -1,5 +1,7 @@
 use std::borrow::Cow;
+use std::rc::Rc; // AJM - stinky
 
+use either::Either;
 use inflections::Inflect;
 use svd::{Access, Cluster, ClusterInfo, EnumeratedValues, Field, Peripheral, Register, RegisterInfo,
           Usage};
@@ -439,7 +441,7 @@ pub fn lookup<'a>(
     evs: &'a [EnumeratedValues],
     fields: &'a [Field],
     register: &'a Register,
-    all_registers: &'a [Register],
+    all_registers: &'a [&Register],
     peripheral: &'a Peripheral,
     all_peripherals: &'a [Peripheral],
     usage: Usage,
