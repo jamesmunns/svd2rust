@@ -795,106 +795,142 @@ fn register_block(
     // ...
     for e in ercs {
         match *e {
-            Either::Left(Register::Single(ref info)) => {
-                ercs_expanded.push(ExpandedRegCluster {
-                    info: Either::Left(info),
-                    name: info.name.to_sanitized_snake_case().into_owned(),
-                    offset: info.address_offset,
-                    ty: Either::Left(
-                        info.name.to_sanitized_upper_case().into_owned(),
+            Either::Left(ref register) => {
+                let register_size = register
+                    .size
+                    .or(defs.size)
+                    .ok_or_else(|| format!("Register {} has no `size` field", register.name))?;
+
+                match *register {
+                    Register::Single(ref info) => ercs_expanded.push(
+                        ExpandedRegCluster {
+                            info: Either::Left(info),
+                            name: info.name.to_sanitized_snake_case().into_owned(),
+                            offset: info.address_offset,
+                            ty: Either::Left(
+                                info.name.to_sanitized_upper_case().into_owned(),
+                            ),
+                        }
                     ),
-                })
-            }
-            Either::Right(Cluster::Single(ref info)) => {
-                ercs_expanded.push(ExpandedRegCluster {
-                    info: Either::Right(info),
-                    name: info.name.to_sanitized_snake_case().into_owned(),
-                    offset: info.address_offset,
-                    ty: Either::Left(
-                        info.name.to_sanitized_upper_case().into_owned(),
-                    ),
-                })
-            }
-            Either::Left(Register::Array(ref info, ref array_info)) => {
-                let has_brackets = info.name.contains("[%s]");
+                    Register::Array(ref info, ref array_info) => {
+                        let sequential_addresses = register_size == array_info.dim_increment * BITS_PER_BYTE;
 
-                let ty = if has_brackets {
-                    info.name.replace("[%s]", "")
-                } else {
-                    info.name.replace("%s", "")
-                };
+                        let has_brackets = info.name.contains("[%s]");
 
-                let ty = Rc::new(ty.to_sanitized_upper_case().into_owned());
+                        let ty = if has_brackets {
+                            info.name.replace("[%s]", "")
+                        } else {
+                            info.name.replace("%s", "")
+                        };
 
-                let indices = array_info
-                    .dim_index
-                    .as_ref()
-                    .map(|v| Cow::from(&**v))
-                    .unwrap_or_else(|| {
-                        Cow::from(
-                            (0..array_info.dim)
-                                .map(|i| i.to_string())
-                                .collect::<Vec<_>>(),
-                        )
-                    });
+                        let ty = Rc::new(ty.to_sanitized_upper_case().into_owned());
 
-                for (idx, i) in indices.iter().zip(0..) {
-                    let name = if has_brackets {
-                        info.name.replace("[%s]", idx)
-                    } else {
-                        info.name.replace("%s", idx)
-                    };
+                        // if dimIndex exists, test if it is a sequence of numbers from 0 to dim
+                        let sequential_indexes = array_info.dim_index.as_ref().map_or(true, |dim_index| {
+                            dim_index
+                                .iter()
+                                .map(|element| element.parse::<u32>())
+                                .eq((0..array_info.dim).map(Ok))
+                        });
 
-                    let offset = info.address_offset +
-                        i * array_info.dim_increment;
+                        let array_convertible = sequential_indexes && sequential_addresses;
 
-                    ercs_expanded.push(ExpandedRegCluster {
-                        info: Either::Left(info),
-                        name: name.to_sanitized_snake_case().into_owned(),
-                        offset: offset,
-                        ty: Either::Right(ty.clone()),
-                    });
+                        if array_convertible {
+                            ercs_expanded.push(
+                                    // RegisterBlockField {
+                                    //     field: util::convert_svd_register(&register),
+                                    //     description: info.description.clone(),
+                                    //     offset: info.address_offset,
+                                    //     size: register_size * array_info.dim,
+                                    // }
+                                ExpandedRegCluster {
+                                    info: Either::Left(info),
+                                    name: info.name.to_sanitized_snake_case().into_owned(),
+                                    offset: offset,
+                                    ty: Either::Right(ty.clone()),
+                                }
+                            );
+                        } else {
+                            let mut field_num = 0;
+                            for field in util::expand_svd_register(register).iter() {
+                                let name = if has_brackets {
+                                    info.name.replace("[%s]", &field_num.to_string())
+                                } else {
+                                    info.name.replace("%s", &field_num.to_string())
+                                };
+                                ercs_expanded.push(
+                                    // RegisterBlockField {
+                                    //     field: field.clone(),
+                                    //     description: info.description.clone(),
+                                    //     offset: info.address_offset + field_num * array_info.dim_increment,
+                                    //     size: register_size,
+                                    // }
+                                    ExpandedRegCluster {
+                                        info: Either::Left(info),
+                                        name: name.to_sanitized_snake_case().into_owned(),
+                                        offset: offset,
+                                        ty: Either::Right(ty.clone()),
+                                    }
+                                );
+                                field_num += 1;
+                            }
+                        }
+                    }
                 }
             }
-            Either::Right(Cluster::Array(ref info, ref array_info)) => {
-                let has_brackets = info.name.contains("[%s]");
+            Either::Right(ref cluster) => {
+                match *cluster {
+                    Cluster::Single(ref info) => {
+                        ercs_expanded.push(ExpandedRegCluster {
+                            info: Either::Right(info),
+                            name: info.name.to_sanitized_snake_case().into_owned(),
+                            offset: info.address_offset,
+                            ty: Either::Left(
+                                info.name.to_sanitized_upper_case().into_owned(),
+                            ),
+                        })
+                    }
+                    Cluster::Array(ref info, ref array_info) => {
+                        let has_brackets = info.name.contains("[%s]");
 
-                let ty = if has_brackets {
-                    info.name.replace("[%s]", "")
-                } else {
-                    info.name.replace("%s", "")
-                };
+                        let ty = if has_brackets {
+                            info.name.replace("[%s]", "")
+                        } else {
+                            info.name.replace("%s", "")
+                        };
 
-                let ty = Rc::new(ty.to_sanitized_upper_case().into_owned());
+                        let ty = Rc::new(ty.to_sanitized_upper_case().into_owned());
 
-                let indices = array_info
-                    .dim_index
-                    .as_ref()
-                    .map(|v| Cow::from(&**v))
-                    .unwrap_or_else(|| {
-                        Cow::from(
-                            (0..array_info.dim)
-                                .map(|i| i.to_string())
-                                .collect::<Vec<_>>(),
-                        )
-                    });
+                        let indices = array_info
+                            .dim_index
+                            .as_ref()
+                            .map(|v| Cow::from(&**v))
+                            .unwrap_or_else(|| {
+                                Cow::from(
+                                    (0..array_info.dim)
+                                        .map(|i| i.to_string())
+                                        .collect::<Vec<_>>(),
+                                )
+                            });
 
-                for (idx, i) in indices.iter().zip(0..) {
-                    let name = if has_brackets {
-                        info.name.replace("[%s]", idx)
-                    } else {
-                        info.name.replace("%s", idx)
-                    };
+                        for (idx, i) in indices.iter().zip(0..) {
+                            let name = if has_brackets {
+                                info.name.replace("[%s]", idx)
+                            } else {
+                                info.name.replace("%s", idx)
+                            };
 
-                    let offset = info.address_offset +
-                        i * array_info.dim_increment;
+                            let offset = info.address_offset +
+                                i * array_info.dim_increment;
 
-                    ercs_expanded.push(ExpandedRegCluster {
-                        info: Either::Right(info),
-                        name: name.to_sanitized_snake_case().into_owned(),
-                        offset: offset,
-                        ty: Either::Right(ty.clone()),
-                    });
+                            ercs_expanded.push(ExpandedRegCluster {
+                                info: Either::Right(info),
+                                name: name.to_sanitized_snake_case().into_owned(),
+                                offset: offset,
+                                ty: Either::Right(ty.clone()),
+                            });
+                        }
+                    }
                 }
             }
         }
