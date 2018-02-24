@@ -784,18 +784,132 @@ fn register_block(
     defs: &Defaults,
     name: Option<&str>,
 ) -> Result<Tokens> {
-    let mut fields = vec![];
+    let mut fields = Tokens::new();
     // enumeration of reserved fields
     let mut i = 0;
     // offset from the base address, in bytes
     let mut offset = 0;
-    for erc in expand(ercs) {
+    let mut ercs_expanded: Vec<ExpandedRegCluster> = vec![];
+
+    // TODO(AJM) - A good comment
+    // ...
+    for e in ercs {
+        match *e {
+            Either::Left(Register::Single(ref info)) => {
+                ercs_expanded.push(ExpandedRegCluster {
+                    info: Either::Left(info),
+                    name: info.name.to_sanitized_snake_case().into_owned(),
+                    offset: info.address_offset,
+                    ty: Either::Left(
+                        info.name.to_sanitized_upper_case().into_owned(),
+                    ),
+                })
+            }
+            Either::Right(Cluster::Single(ref info)) => {
+                ercs_expanded.push(ExpandedRegCluster {
+                    info: Either::Right(info),
+                    name: info.name.to_sanitized_snake_case().into_owned(),
+                    offset: info.address_offset,
+                    ty: Either::Left(
+                        info.name.to_sanitized_upper_case().into_owned(),
+                    ),
+                })
+            }
+            Either::Left(Register::Array(ref info, ref array_info)) => {
+                let has_brackets = info.name.contains("[%s]");
+
+                let ty = if has_brackets {
+                    info.name.replace("[%s]", "")
+                } else {
+                    info.name.replace("%s", "")
+                };
+
+                let ty = Rc::new(ty.to_sanitized_upper_case().into_owned());
+
+                let indices = array_info
+                    .dim_index
+                    .as_ref()
+                    .map(|v| Cow::from(&**v))
+                    .unwrap_or_else(|| {
+                        Cow::from(
+                            (0..array_info.dim)
+                                .map(|i| i.to_string())
+                                .collect::<Vec<_>>(),
+                        )
+                    });
+
+                for (idx, i) in indices.iter().zip(0..) {
+                    let name = if has_brackets {
+                        info.name.replace("[%s]", idx)
+                    } else {
+                        info.name.replace("%s", idx)
+                    };
+
+                    let offset = info.address_offset +
+                        i * array_info.dim_increment;
+
+                    ercs_expanded.push(ExpandedRegCluster {
+                        info: Either::Left(info),
+                        name: name.to_sanitized_snake_case().into_owned(),
+                        offset: offset,
+                        ty: Either::Right(ty.clone()),
+                    });
+                }
+            }
+            Either::Right(Cluster::Array(ref info, ref array_info)) => {
+                let has_brackets = info.name.contains("[%s]");
+
+                let ty = if has_brackets {
+                    info.name.replace("[%s]", "")
+                } else {
+                    info.name.replace("%s", "")
+                };
+
+                let ty = Rc::new(ty.to_sanitized_upper_case().into_owned());
+
+                let indices = array_info
+                    .dim_index
+                    .as_ref()
+                    .map(|v| Cow::from(&**v))
+                    .unwrap_or_else(|| {
+                        Cow::from(
+                            (0..array_info.dim)
+                                .map(|i| i.to_string())
+                                .collect::<Vec<_>>(),
+                        )
+                    });
+
+                for (idx, i) in indices.iter().zip(0..) {
+                    let name = if has_brackets {
+                        info.name.replace("[%s]", idx)
+                    } else {
+                        info.name.replace("%s", idx)
+                    };
+
+                    let offset = info.address_offset +
+                        i * array_info.dim_increment;
+
+                    ercs_expanded.push(ExpandedRegCluster {
+                        info: Either::Right(info),
+                        name: name.to_sanitized_snake_case().into_owned(),
+                        offset: offset,
+                        ty: Either::Right(ty.clone()),
+                    });
+                }
+            }
+        }
+    }
+
+    ercs_expanded.sort_by_key(|x| x.offset);
+
+    for erc in ercs_expanded {
         let pad = if let Some(pad) = erc.offset.checked_sub(offset) {
             pad
         } else {
             writeln!(
                 io::stderr(),
-                "WARNING {} overlaps with another register or cluster at offset {}. Ignoring.",
+                "WARNING {} overlaps with another register/cluster at offset {}. \
+                 Ignoring.",
                 erc.name,
                 erc.offset
             ).ok();
@@ -805,7 +919,7 @@ fn register_block(
         if pad != 0 {
             let name = Ident::new(format!("_reserved{}", i));
             let pad = pad as usize;
-            fields.push(quote! {
+            fields.append(quote! {
                 #name : [u8; #pad],
             });
             i += 1;
@@ -814,9 +928,8 @@ fn register_block(
         let comment = &format!(
             "0x{:02x} - {}",
             erc.offset,
-            util::respace(&erc.description_of())
-        )
-            [..];
+            util::respace(&erc.description_of()),
+        )[..];
 
         let rty = if let Some(name) = name {
             let mod_name = name.to_sanitized_snake_case();
@@ -835,7 +948,7 @@ fn register_block(
             }
         };
         let reg_name = Ident::new(&*erc.name.to_sanitized_snake_case());
-        fields.push(quote! {
+        fields.append(quote! {
             #[doc = #comment]
             pub #reg_name : #rty,
         });
@@ -855,7 +968,7 @@ fn register_block(
         /// Register block
         #[repr(C)]
         pub struct #name {
-            #(#fields)*
+            #fields
         }
     })
 }
