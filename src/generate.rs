@@ -4,8 +4,8 @@ use std::io::{self, Write};
 use cast::u64;
 use either::Either;
 use quote::{ToTokens, Tokens};
-use svd::{Access, BitRange, Cluster, Defaults, Device, EnumeratedValues, Field,
-          Peripheral, Register, Usage, WriteConstraint};
+use svd::{Access, BitRange, Cluster, ClusterInfo, Defaults, Device, EnumeratedValues, Field,
+          Peripheral, Register, RegisterInfo, Usage, WriteConstraint};
 use syn::{self, Ident};
 
 use errors::*;
@@ -559,7 +559,7 @@ fn cluster_block(
 
     // name_sc needs to take into account array type.
     let erc = [Either::Right(c.clone()); 1];
-    let expanded_clusters = util::expand(&erc);
+    let expanded_clusters = expand(&erc);
     let ec = expanded_clusters.first().unwrap();
     let description = util::respace(&c.description);
 
@@ -610,6 +610,174 @@ fn cluster_block(
     })
 }
 
+use std::borrow::Cow;
+use std::rc::Rc; // AJM - stinky
+
+// AJM - This structure went away upstream. Should this be moved somewhere else? Look between BASE and `dimindex`, what happened here?
+pub struct ExpandedRegCluster<'a> {
+    pub info: Either<&'a RegisterInfo, &'a ClusterInfo>,
+    pub name: String,
+    pub offset: u32,
+    pub ty: Either<String, Rc<String>>,
+}
+
+impl<'a> ExpandedRegCluster<'a> {
+    /// Return the description of the expanded register / cluster.
+    pub fn description_of(&self) -> &str {
+        match self.info {
+            Either::Left(info) => &info.description,
+            Either::Right(info) => &info.description,
+        }
+    }
+
+    /// Return the size of the register / cluster.
+    pub fn size_of(&self) -> Option<u32> {
+        match self.info {
+            Either::Left(info) => info.size,
+            Either::Right(info) => {
+                // Cluster size is the summation of the size of each of the cluster's children.
+                let mut offset = 0;
+                let mut size = 0;
+                for c in expand(&info.children) {
+                    if let Some(sz) = c.size_of() {
+                        size += sz;
+                    }
+
+                    let pad = if let Some(pad) = c.offset.checked_sub(offset) {
+                        pad
+                    } else {
+                        0
+                    };
+
+                    if pad != 0 {
+                        size += pad * 8;
+                    }
+                    offset = c.offset + c.size_of().or(Some(32))? / 8;
+                }
+                Some(size)
+            }
+        }
+    }
+}
+
+// AJM - This function is going to require some work
+/// Takes a list of either "registers" or "clusters", some of which may actually be register
+/// arrays, and turns it into a new *sorted* (by address offset) list of registers where the
+/// register arrays have been expanded.
+pub fn expand(ercs: &[Either<Register, Cluster>]) -> Vec<ExpandedRegCluster> {
+    let mut out: Vec<ExpandedRegCluster> = vec![];
+
+    for e in ercs {
+        match *e {
+            Either::Left(Register::Single(ref info)) => {
+                out.push(ExpandedRegCluster {
+                    info: Either::Left(info),
+                    name: info.name.to_sanitized_snake_case().into_owned(),
+                    offset: info.address_offset,
+                    ty: Either::Left(
+                        info.name.to_sanitized_upper_case().into_owned(),
+                    ),
+                })
+            }
+            Either::Right(Cluster::Single(ref info)) => {
+                out.push(ExpandedRegCluster {
+                    info: Either::Right(info),
+                    name: info.name.to_sanitized_snake_case().into_owned(),
+                    offset: info.address_offset,
+                    ty: Either::Left(
+                        info.name.to_sanitized_upper_case().into_owned(),
+                    ),
+                })
+            }
+            Either::Left(Register::Array(ref info, ref array_info)) => {
+                let has_brackets = info.name.contains("[%s]");
+
+                let ty = if has_brackets {
+                    info.name.replace("[%s]", "")
+                } else {
+                    info.name.replace("%s", "")
+                };
+
+                let ty = Rc::new(ty.to_sanitized_upper_case().into_owned());
+
+                let indices = array_info
+                    .dim_index
+                    .as_ref()
+                    .map(|v| Cow::from(&**v))
+                    .unwrap_or_else(|| {
+                        Cow::from(
+                            (0..array_info.dim)
+                                .map(|i| i.to_string())
+                                .collect::<Vec<_>>(),
+                        )
+                    });
+
+                for (idx, i) in indices.iter().zip(0..) {
+                    let name = if has_brackets {
+                        info.name.replace("[%s]", idx)
+                    } else {
+                        info.name.replace("%s", idx)
+                    };
+
+                    let offset = info.address_offset +
+                        i * array_info.dim_increment;
+
+                    out.push(ExpandedRegCluster {
+                        info: Either::Left(info),
+                        name: name.to_sanitized_snake_case().into_owned(),
+                        offset: offset,
+                        ty: Either::Right(ty.clone()),
+                    });
+                }
+            }
+            Either::Right(Cluster::Array(ref info, ref array_info)) => {
+                let has_brackets = info.name.contains("[%s]");
+
+                let ty = if has_brackets {
+                    info.name.replace("[%s]", "")
+                } else {
+                    info.name.replace("%s", "")
+                };
+
+                let ty = Rc::new(ty.to_sanitized_upper_case().into_owned());
+
+                let indices = array_info
+                    .dim_index
+                    .as_ref()
+                    .map(|v| Cow::from(&**v))
+                    .unwrap_or_else(|| {
+                        Cow::from(
+                            (0..array_info.dim)
+                                .map(|i| i.to_string())
+                                .collect::<Vec<_>>(),
+                        )
+                    });
+
+                for (idx, i) in indices.iter().zip(0..) {
+                    let name = if has_brackets {
+                        info.name.replace("[%s]", idx)
+                    } else {
+                        info.name.replace("%s", idx)
+                    };
+
+                    let offset = info.address_offset +
+                        i * array_info.dim_increment;
+
+                    out.push(ExpandedRegCluster {
+                        info: Either::Right(info),
+                        name: name.to_sanitized_snake_case().into_owned(),
+                        offset: offset,
+                        ty: Either::Right(ty.clone()),
+                    });
+                }
+            }
+        }
+    }
+
+    out.sort_by_key(|x| x.offset);
+    out
+}
+
 // AJM - validate against upstream branch - likely needs updates
 fn register_block(
     ercs: &[Either<Register, Cluster>],
@@ -621,7 +789,7 @@ fn register_block(
     let mut i = 0;
     // offset from the base address, in bytes
     let mut offset = 0;
-    for erc in util::expand(ercs) {
+    for erc in expand(ercs) {
         let pad = if let Some(pad) = erc.offset.checked_sub(offset) {
             pad
         } else {

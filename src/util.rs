@@ -1,9 +1,8 @@
 use std::borrow::Cow;
-use std::rc::Rc; // AJM - stinky
 
 use either::Either;
 use inflections::Inflect;
-use svd::{Access, Cluster, ClusterInfo, EnumeratedValues, Field, Peripheral, Register, RegisterInfo,
+use svd::{self, Access, Cluster, EnumeratedValues, Field, Peripheral, Register,
           Usage};
 use syn::{self, Ident};
 use quote::Tokens;
@@ -139,53 +138,6 @@ pub fn respace(s: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-// AJM - This structure went away upstream. Should this be moved somewhere else? Look between BASE and `dimindex`, what happened here?
-pub struct ExpandedRegCluster<'a> {
-    pub info: Either<&'a RegisterInfo, &'a ClusterInfo>,
-    pub name: String,
-    pub offset: u32,
-    pub ty: Either<String, Rc<String>>,
-}
-
-impl<'a> ExpandedRegCluster<'a> {
-    /// Return the description of the expanded register / cluster.
-    pub fn description_of(&self) -> &str {
-        match self.info {
-            Either::Left(info) => &info.description,
-            Either::Right(info) => &info.description,
-        }
-    }
-
-    /// Return the size of the register / cluster.
-    pub fn size_of(&self) -> Option<u32> {
-        match self.info {
-            Either::Left(info) => info.size,
-            Either::Right(info) => {
-                // Cluster size is the summation of the size of each of the cluster's children.
-                let mut offset = 0;
-                let mut size = 0;
-                for c in expand(&info.children) {
-                    if let Some(sz) = c.size_of() {
-                        size += sz;
-                    }
-
-                    let pad = if let Some(pad) = c.offset.checked_sub(offset) {
-                        pad
-                    } else {
-                        0
-                    };
-
-                    if pad != 0 {
-                        size += pad * 8;
-                    }
-                    offset = c.offset + c.size_of().or(Some(32))? / 8;
-                }
-                Some(size)
-            }
-        }
-    }
-}
-
 /// Return only the clusters from the slice of either register or clusters.
 pub fn only_clusters(ercs: &[Either<Register, Cluster>]) -> Vec<&Cluster> {
     let clusters: Vec<&Cluster> = ercs.iter()
@@ -208,122 +160,118 @@ pub fn only_registers(ercs: &[Either<Register, Cluster>]) -> Vec<&Register> {
     registers
 }
 
-// AJM - This function is going to require some work
-/// Takes a list of either "registers" or "clusters", some of which may actually be register
-/// arrays, and turns it into a new *sorted* (by address offset) list of registers where the
-/// register arrays have been expanded.
-pub fn expand(ercs: &[Either<Register, Cluster>]) -> Vec<ExpandedRegCluster> {
-    let mut out: Vec<ExpandedRegCluster> = vec![];
+/// Takes a svd::Register which may be a register array, and turn in into
+/// a list of syn::Field where the register arrays have been expanded.
+pub fn expand_svd_register(register: &Register) -> Vec<syn::Field> {
+    let name_to_ty = |name: &String| -> syn::Ty {
+        syn::Ty::Path(
+            None,
+            syn::Path {
+                global: false,
+                segments: vec![
+                    syn::PathSegment {
+                        ident: Ident::new(name.to_sanitized_upper_case()),
+                        parameters: syn::PathParameters::none(),
+                    },
+                ],
+            },
+        )
+    };
 
-    for e in ercs {
-        match *e {
-            Either::Left(Register::Single(ref info)) => {
-                out.push(ExpandedRegCluster {
-                    info: Either::Left(info),
-                    name: info.name.to_sanitized_snake_case().into_owned(),
-                    offset: info.address_offset,
-                    ty: Either::Left(
-                        info.name.to_sanitized_upper_case().into_owned(),
-                    ),
-                })
-            }
-            Either::Right(Cluster::Single(ref info)) => {
-                out.push(ExpandedRegCluster {
-                    info: Either::Right(info),
-                    name: info.name.to_sanitized_snake_case().into_owned(),
-                    offset: info.address_offset,
-                    ty: Either::Left(
-                        info.name.to_sanitized_upper_case().into_owned(),
-                    ),
-                })
-            }
-            Either::Left(Register::Array(ref info, ref array_info)) => {
-                let has_brackets = info.name.contains("[%s]");
+    let mut out = vec![];
 
-                let ty = if has_brackets {
+    match *register {
+        Register::Single(ref _info) => out.push(convert_svd_register(register)),
+        Register::Array(ref info, ref array_info) => {
+            let has_brackets = info.name.contains("[%s]");
+
+            let indices = array_info
+                .dim_index
+                .as_ref()
+                .map(|v| Cow::from(&**v))
+                .unwrap_or_else(|| {
+                    Cow::from(
+                        (0..array_info.dim)
+                            .map(|i| i.to_string())
+                            .collect::<Vec<_>>(),
+                    )
+                });
+
+            for (idx, _i) in indices.iter().zip(0..) {
+                let name = if has_brackets {
+                    info.name.replace("[%s]", format!("{}", idx).as_str())
+                } else {
+                    info.name.replace("%s", format!("{}", idx).as_str())
+                };
+
+                let ty_name = if has_brackets {
                     info.name.replace("[%s]", "")
                 } else {
                     info.name.replace("%s", "")
                 };
 
-                let ty = Rc::new(ty.to_sanitized_upper_case().into_owned());
+                let ident = Ident::new(name.to_sanitized_snake_case());
+                let ty = name_to_ty(&ty_name);
 
-                let indices = array_info
-                    .dim_index
-                    .as_ref()
-                    .map(|v| Cow::from(&**v))
-                    .unwrap_or_else(|| {
-                        Cow::from(
-                            (0..array_info.dim)
-                                .map(|i| i.to_string())
-                                .collect::<Vec<_>>(),
-                        )
-                    });
-
-                for (idx, i) in indices.iter().zip(0..) {
-                    let name = if has_brackets {
-                        info.name.replace("[%s]", idx)
-                    } else {
-                        info.name.replace("%s", idx)
-                    };
-
-                    let offset = info.address_offset +
-                        i * array_info.dim_increment;
-
-                    out.push(ExpandedRegCluster {
-                        info: Either::Left(info),
-                        name: name.to_sanitized_snake_case().into_owned(),
-                        offset: offset,
-                        ty: Either::Right(ty.clone()),
-                    });
-                }
-            }
-            Either::Right(Cluster::Array(ref info, ref array_info)) => {
-                let has_brackets = info.name.contains("[%s]");
-
-                let ty = if has_brackets {
-                    info.name.replace("[%s]", "")
-                } else {
-                    info.name.replace("%s", "")
-                };
-
-                let ty = Rc::new(ty.to_sanitized_upper_case().into_owned());
-
-                let indices = array_info
-                    .dim_index
-                    .as_ref()
-                    .map(|v| Cow::from(&**v))
-                    .unwrap_or_else(|| {
-                        Cow::from(
-                            (0..array_info.dim)
-                                .map(|i| i.to_string())
-                                .collect::<Vec<_>>(),
-                        )
-                    });
-
-                for (idx, i) in indices.iter().zip(0..) {
-                    let name = if has_brackets {
-                        info.name.replace("[%s]", idx)
-                    } else {
-                        info.name.replace("%s", idx)
-                    };
-
-                    let offset = info.address_offset +
-                        i * array_info.dim_increment;
-
-                    out.push(ExpandedRegCluster {
-                        info: Either::Right(info),
-                        name: name.to_sanitized_snake_case().into_owned(),
-                        offset: offset,
-                        ty: Either::Right(ty.clone()),
-                    });
-                }
+                out.push(syn::Field {
+                    ident: Some(ident),
+                    vis: syn::Visibility::Public,
+                    attrs: vec![],
+                    ty: ty,
+                });
             }
         }
     }
-
-    out.sort_by_key(|x| x.offset);
     out
+}
+
+pub fn convert_svd_register(register: &svd::Register) -> syn::Field {
+    let name_to_ty = |name: &String| -> syn::Ty {
+        syn::Ty::Path(
+            None,
+            syn::Path {
+                global: false,
+                segments: vec![
+                    syn::PathSegment {
+                        ident: Ident::new(name.to_sanitized_upper_case()),
+                        parameters: syn::PathParameters::none(),
+                    },
+                ],
+            },
+        )
+    };
+
+    match *register {
+        Register::Single(ref info) => syn::Field {
+            ident: Some(Ident::new(info.name.to_sanitized_snake_case())),
+            vis: syn::Visibility::Public,
+            attrs: vec![],
+            ty: name_to_ty(&info.name),
+        },
+        Register::Array(ref info, ref array_info) => {
+            let has_brackets = info.name.contains("[%s]");
+
+            let name = if has_brackets {
+                info.name.replace("[%s]", "")
+            } else {
+                info.name.replace("%s", "")
+            };
+
+            let ident = Ident::new(name.to_sanitized_snake_case());
+
+            let ty = syn::Ty::Array(
+                Box::new(name_to_ty(&name)),
+                syn::ConstExpr::Lit(syn::Lit::Int(array_info.dim as u64, syn::IntTy::Unsuffixed)),
+            );
+
+            syn::Field {
+                ident: Some(ident),
+                vis: syn::Visibility::Public,
+                attrs: vec![],
+                ty: ty,
+            }
+        }
+    }
 }
 
 pub fn name_of(register: &Register) -> Cow<str> {
@@ -550,14 +498,14 @@ fn lookup_in_field<'f>(
     for evs in &field.enumerated_values {
         if evs.name.as_ref().map(|s| &**s) == Some(base_evs) {
             return Ok(
-                ((
+                (
                     evs,
                     Some(Base {
                         field: &field.name,
                         register: base_register,
                         peripheral: base_peripheral,
                     }),
-                )),
+                ),
             );
         }
     }
